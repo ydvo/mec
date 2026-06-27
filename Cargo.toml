@@ -1,0 +1,10 @@
+[package]
+name = "mec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22.1"
+dotenv = "0.15.0"
+imap = "3.0.0-alpha.15"
+mail-parser = "0.11.4"
