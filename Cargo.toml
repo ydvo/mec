@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.103"
 base64 = "0.22.1"
 dotenv = "0.15.0"
 imap = "3.0.0-alpha.15"
