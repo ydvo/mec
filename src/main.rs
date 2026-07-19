@@ -1,4 +1,6 @@
 use dotenv::dotenv;
+use imap::extensions::sort::{SortCharset, SortCriterion};
+use imap::types::Fetches;
 use imap::{ImapConnection, Session};
 use mail_parser::MessageParser;
 use std::env;
@@ -7,6 +9,11 @@ extern crate imap;
 
 type ImapSession = imap::Session<Box<dyn ImapConnection>>;
 
+/// Imap connection info
+///
+/// * `session`: the imap session
+/// * `current_mailbox`: what mailbox currently connected to
+/// * `mailbox_info`: details about mailbox e.g. total num msgs
 pub struct Connection {
     pub session: ImapSession,
     pub current_mailbox: String,
@@ -27,6 +34,7 @@ impl Connection {
     }
 }
 
+/// Create new imap session
 fn make_connection() -> imap::error::Result<ImapSession> {
     dotenv().ok();
     let email = env::var("EMAIL").unwrap();
@@ -45,16 +53,45 @@ fn make_connection() -> imap::error::Result<ImapSession> {
 ///
 /// * `session`: Current Imap Session
 /// * `num_messages`: number of msgs to list
-fn list_messages(c: &mut Connection, num_messages: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let total = c.mailbox_info.as_ref().expect("No mailbox selected").exists;
-    if total == 0 {
-        return Ok(());
+fn list_messages(c: &mut Connection, num_messages: u32) -> anyhow::Result<()> {
+    let messages: Fetches;
+
+    if !c.session.capabilities()?.has_str("SORT") {
+        let uid_hashset = c.session.uid_search("ALL")?;
+        let mut uid_vec: Vec<_> = uid_hashset.into_iter().collect();
+        uid_vec.sort_unstable_by_key(|uid| std::cmp::Reverse(*uid));
+
+        let uids_to_fetch: Vec<String> = uid_vec
+            .into_iter()
+            .take(num_messages as usize)
+            .map(|uid| uid.to_string())
+            .collect();
+
+        let uid_set_str = uids_to_fetch.join(",");
+
+        messages = c.session.uid_fetch(&uid_set_str, "RFC822.HEADER")?;
+    } else {
+        let sorted_session = c.session.sort(
+            &[SortCriterion::Reverse(&SortCriterion::Arrival)],
+            SortCharset::Utf8,
+            "ALL",
+        )?;
+
+        let uids_to_fetch: Vec<String> = sorted_session
+            .into_iter()
+            .take(num_messages as usize)
+            .map(|uid| uid.to_string())
+            .collect();
+
+        let uid_set = uids_to_fetch.join(",");
+
+        messages = c.session.uid_fetch(&uid_set, "RFC822.HEADER")?;
     }
-    let range = format!("{}:*", total.saturating_sub(num_messages - 1));
 
-    let messages = c.session.fetch(&range, "RFC822.HEADER")?;
-
+    // print header for each msg
     for msg in messages.iter() {
+        let uid = msg.uid.unwrap_or_default();
+
         let raw_header = match msg.header() {
             Some(h) => h,
             None => continue,
@@ -84,6 +121,7 @@ fn list_messages(c: &mut Connection, num_messages: u32) -> Result<(), Box<dyn st
             .map(|d| format!("{}-{:02}-{:02}", d.year, d.month, d.day))
             .unwrap_or_default();
 
+        println!("UID:     {}", uid);
         println!("From:    {}", from);
         println!("Subject: {}", subject);
         println!("Date:    {}", date);
@@ -92,18 +130,41 @@ fn list_messages(c: &mut Connection, num_messages: u32) -> Result<(), Box<dyn st
     Ok(())
 }
 
-fn list_mailboxes() -> anyhow::Result<()> {
-    print!("Mailboxes");
+fn list_mailboxes(c: &mut Connection) -> anyhow::Result<()> {
+    let mailboxes = c.session.list(None, Some("*"))?;
+    println!("Available mailboxes:");
+    for mb in mailboxes.iter() {
+        println!("  - {}", mb.name());
+    }
+
     Ok(())
 }
 
 fn select_mailbox(c: &mut Connection, mailbox: &str) -> anyhow::Result<()> {
-    print!(" select box");
+    c.mailbox_info = Some(c.session.select(mailbox)?);
+    c.current_mailbox = mailbox.to_string();
+    println!("Selected mailbox: {}", mailbox);
     Ok(())
 }
 
-fn read_full_message(uid: u32) -> anyhow::Result<()> {
-    print!("msg");
+fn read_full_message(c: &mut Connection, uid: u32) -> anyhow::Result<()> {
+    let fetch = c.session.uid_fetch(&uid.to_string(), "RFC822")?;
+    if let Some(msg) = fetch
+        .iter()
+        .next()
+        .and_then(|f| f.body())
+        .and_then(|f| MessageParser::default().parse(f))
+    {
+        let count = msg.text_body_count();
+        for i in 0..count {
+            if let Some(txt) = msg.body_text(i) {
+                println!("{}", txt);
+            }
+        }
+    } else {
+        println!("No body for uid {}", uid);
+    }
+
     Ok(())
 }
 
@@ -149,6 +210,17 @@ fn main() -> anyhow::Result<()> {
             ["list", n] => {
                 let count = n.parse().unwrap_or(10);
                 if let Err(e) = list_messages(&mut connection, count) {
+                    eprintln!("error: {}", e);
+                }
+            }
+            ["listm"] => {
+                if let Err(e) = list_mailboxes(&mut connection) {
+                    eprintln!("error: {}", e);
+                }
+            }
+            ["read", n] => {
+                let uid = n.parse()?;
+                if let Err(e) = read_full_message(&mut connection, uid) {
                     eprintln!("error: {}", e);
                 }
             }
