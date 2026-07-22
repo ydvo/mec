@@ -1,6 +1,6 @@
 use dotenv::dotenv;
 use imap::extensions::sort::{SortCharset, SortCriterion};
-use imap::types::Fetches;
+use imap::types::{Fetches, Flag};
 use imap::{ImapConnection, Session};
 use mail_parser::MessageParser;
 use std::env;
@@ -147,6 +147,10 @@ fn select_mailbox(c: &mut Connection, mailbox: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// fetches full messages; set READ flag
+///
+/// * `c`: imap connection instance
+/// * `uid`: message id
 fn read_full_message(c: &mut Connection, uid: u32) -> anyhow::Result<()> {
     let fetch = c.session.uid_fetch(&uid.to_string(), "RFC822")?;
     if let Some(msg) = fetch
@@ -168,8 +172,50 @@ fn read_full_message(c: &mut Connection, uid: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn set_flag(uid: u32, f: Option<String>) -> anyhow::Result<()> {
-    print!("flag");
+fn set_flag(c: &mut Connection, uid: u32, f: String) -> anyhow::Result<()> {
+    //    let Some(flag) = f else {
+    //        println!(
+    //            "Usage: flag <UID> <flag>\nAvailable flags: Seen, Flagged, Deleted,
+    // Answered, Draft"
+    //        );
+    //        return Ok(());
+    //    };
+
+    let imap_flag = match f.to_ascii_lowercase().as_str() {
+        "seen" => Flag::Seen,
+        "flagged" => Flag::Flagged,
+        "deleted" => Flag::Deleted,
+        "answered" => Flag::Answered,
+        "draft" => Flag::Draft,
+        other => {
+            anyhow::bail!("Unsupported flag {}", other);
+        }
+    };
+
+    let fetches = c.session.uid_fetch(&uid.to_string(), "FLAGS")?;
+
+    let current_flags: Vec<Flag> = fetches
+        .iter()
+        .next()
+        .map(|f| f.flags().to_vec())
+        .unwrap_or_default();
+
+    let has_flag = current_flags.iter().any(|f| f == &imap_flag);
+
+    let action: &str;
+
+    let cmd = if has_flag {
+        action = "removed from";
+        format!("-FLAGS ({})", imap_flag)
+    } else {
+        action = "added to";
+        format!("+FLAGS ({})", imap_flag)
+    };
+
+    c.session.uid_store(&uid.to_string(), &cmd)?;
+
+    println!("Flag {} {} to {}", imap_flag, action, uid);
+
     Ok(())
 }
 
@@ -183,7 +229,8 @@ fn main() -> anyhow::Result<()> {
         listm: List possible mailboxes \n
         select x: Select mailbox x \n
         read x: Print message from uid \n
-        flag x f: toggle flag f on msg uid x "
+        flag x f: toggle flag f on msg uid x \n
+        help: list commands"
     );
 
     let stdin = std::io::stdin();
@@ -223,6 +270,23 @@ fn main() -> anyhow::Result<()> {
                 if let Err(e) = read_full_message(&mut connection, uid) {
                     eprintln!("error: {}", e);
                 }
+            }
+            ["flag", n, f] => {
+                let uid = n.parse()?;
+                if let Err(e) = set_flag(&mut connection, uid, f.to_string()) {
+                    eprintln!("error: {}", e);
+                }
+            }
+            ["help"] => {
+                println!(
+                    "
+                    list x: List x most recent messages and uid \n
+                    listm: List possible mailboxes \n
+                    select x: Select mailbox x \n
+                    read x: Print message from uid \n
+                    flag x f: toggle flag f on msg uid x\n
+                    help: list commands"
+                );
             }
             _ => eprintln!("unknown command"),
         }
